@@ -11,8 +11,8 @@ import os
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
 os.system("playwright install chromium")
 
-USUARIO_ITC = "contato@scandolaracontabilidade.com.br"
-SENHA_ITC = "448532"
+USUARIO_ITC = st.secrets["USUARIO_ITC"]
+SENHA_ITC = st.secrets["SENHA_ITC"]
 MAX_WORKERS = 10 
 
 # =========================================================================
