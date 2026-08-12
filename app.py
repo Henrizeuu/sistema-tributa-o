@@ -135,7 +135,7 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
 # =========================================================================
 st.set_page_config(page_title="Validador NCM - Epiverso", page_icon="⚡", layout="centered")
 
-st.title("⚡ Robô Fiscal ITC - Epiverso")
+st.title("⚡ Robô Fiscal - Epiverso")
 st.markdown("Cole ou digite os códigos NCM abaixo para fazer a varredura em massa.")
 
 texto_ncms = st.text_area(
