@@ -133,9 +133,9 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
 # =========================================================================
 # NOVA INTERFACE STREAMLIT COM FILTRO ANTI-DUPLICIDADE
 # =========================================================================
-st.set_page_config(page_title="Validador NCM - Epiverso", page_icon="⚡", layout="centered")
+st.set_page_config(page_title="Validador NCM", page_icon="⚡", layout="centered")
 
-st.title("⚡ Robô Fiscal - Epiverso")
+st.title("⚡ Robô Fiscal - Tributação NCM")
 st.markdown("Cole ou digite os códigos NCM abaixo para fazer a varredura em massa.")
 
 texto_ncms = st.text_area(
