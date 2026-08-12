@@ -131,14 +131,13 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
 
 
 # =========================================================================
-# NOVA INTERFACE STREAMLIT (Caixa de texto em vez de upload)
+# NOVA INTERFACE STREAMLIT COM FILTRO ANTI-DUPLICIDADE
 # =========================================================================
 st.set_page_config(page_title="Validador NCM - Epiverso", page_icon="⚡", layout="centered")
 
 st.title("⚡ Robô Fiscal ITC - Epiverso")
 st.markdown("Cole ou digite os códigos NCM abaixo para fazer a varredura em massa.")
 
-# AQUI ESTÁ A MUDANÇA: Sai o botão de arquivo, entra a caixa de texto
 texto_ncms = st.text_area(
     "Digite as NCMs (uma abaixo da outra):", 
     height=200, 
@@ -147,13 +146,29 @@ texto_ncms = st.text_area(
 
 if st.button("Iniciar Varredura 🚀", type="primary", use_container_width=True):
     
-    # Se a pessoa apertar o botão sem digitar nada
     if not texto_ncms.strip():
         st.warning("Por favor, digite pelo menos uma NCM antes de iniciar.")
     else:
-        # Transforma o texto digitado em uma planilha virtual do Pandas!
-        lista_ncms = [ncm.strip() for ncm in texto_ncms.split('\n') if ncm.strip()]
-        df = pd.DataFrame({"NCM": lista_ncms})
+        # --- O NOVO FILTRO INTELIGENTE COMEÇA AQUI ---
+        lista_ncms_original = [ncm.strip() for ncm in texto_ncms.split('\n') if ncm.strip()]
+        lista_ncms_unicas = []
+        ncms_vistas = set()
+        
+        for ncm in lista_ncms_original:
+            # Tira os pontos para comparar o valor real do número
+            ncm_numeros = ncm.replace(".", "")
+            if ncm_numeros not in ncms_vistas:
+                ncms_vistas.add(ncm_numeros)
+                lista_ncms_unicas.append(ncm) # Salva a primeira versão que o usuário digitou
+        
+        # Se encontrou repetidas, avisa na tela
+        duplicadas = len(lista_ncms_original) - len(lista_ncms_unicas)
+        if duplicadas > 0:
+            st.toast(f"🧹 {duplicadas} NCM(s) duplicada(s) removida(s) automaticamente!", icon="✅")
+        # --- O FILTRO INTELIGENTE TERMINA AQUI ---
+
+        # Transforma a lista limpa na nossa planilha virtual
+        df = pd.DataFrame({"NCM": lista_ncms_unicas})
         
         if "ICMS_ST" not in df.columns:
             df["ICMS_ST"] = ""
@@ -199,10 +214,8 @@ if st.button("Iniciar Varredura 🚀", type="primary", use_container_width=True)
 
         status_text.success("✅ Operação concluída em tempo recorde!")
         
-        # Mostra o resultado final diretamente na tela da pessoa
         st.dataframe(df, use_container_width=True)
         
-        # Salva o resultado na memória para download (caso ela queira o Excel)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
