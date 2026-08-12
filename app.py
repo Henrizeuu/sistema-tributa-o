@@ -11,7 +11,6 @@ import os
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
 os.system("playwright install chromium")
 
-ARQUIVO_EXCEL = "lista_ncm.xlsx"
 USUARIO_ITC = "contato@scandolaracontabilidade.com.br"
 SENHA_ITC = "448532"
 MAX_WORKERS = 10 
@@ -132,18 +131,29 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
 
 
 # =========================================================================
-# NOVA INTERFACE STREAMLIT (Substitui o rodar_foguete() do terminal)
+# NOVA INTERFACE STREAMLIT (Caixa de texto em vez de upload)
 # =========================================================================
 st.set_page_config(page_title="Validador NCM - Epiverso", page_icon="⚡", layout="centered")
 
 st.title("⚡ Robô Fiscal ITC - Epiverso")
-st.markdown("Faça a varredura em massa de ICMS/ST e PIS/COFINS em alta velocidade.")
+st.markdown("Cole ou digite os códigos NCM abaixo para fazer a varredura em massa.")
 
-arquivo_up = st.file_uploader("Suba a planilha Excel (.xlsx)", type=["xlsx"])
+# AQUI ESTÁ A MUDANÇA: Sai o botão de arquivo, entra a caixa de texto
+texto_ncms = st.text_area(
+    "Digite as NCMs (uma abaixo da outra):", 
+    height=200, 
+    placeholder="Exemplo:\n85365090\n39222000"
+)
 
-if arquivo_up is not None:
-    if st.button("Iniciar Varredura 🚀", type="primary", use_container_width=True):
-        df = pd.read_excel(arquivo_up)
+if st.button("Iniciar Varredura 🚀", type="primary", use_container_width=True):
+    
+    # Se a pessoa apertar o botão sem digitar nada
+    if not texto_ncms.strip():
+        st.warning("Por favor, digite pelo menos uma NCM antes de iniciar.")
+    else:
+        # Transforma o texto digitado em uma planilha virtual do Pandas!
+        lista_ncms = [ncm.strip() for ncm in texto_ncms.split('\n') if ncm.strip()]
+        df = pd.DataFrame({"NCM": lista_ncms})
         
         if "ICMS_ST" not in df.columns:
             df["ICMS_ST"] = ""
@@ -189,14 +199,17 @@ if arquivo_up is not None:
 
         status_text.success("✅ Operação concluída em tempo recorde!")
         
-        # Salva o resultado na memória para download
+        # Mostra o resultado final diretamente na tela da pessoa
+        st.dataframe(df, use_container_width=True)
+        
+        # Salva o resultado na memória para download (caso ela queira o Excel)
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, index=False)
         processado_xlsx = output.getvalue()
         
         st.download_button(
-            label="📥 Baixar Planilha Atualizada",
+            label="📥 Baixar Resultado em Planilha",
             data=processado_xlsx,
             file_name="lista_ncm_atualizada.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
