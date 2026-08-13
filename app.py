@@ -7,38 +7,22 @@ import sys
 import streamlit as st
 import io
 import os
+import queue
 
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
 os.system("playwright install chromium")
 
 USUARIO_ITC = st.secrets["USUARIO_ITC"]
 SENHA_ITC = st.secrets["SENHA_ITC"]
-MAX_WORKERS = 1 
+
+# === A MÁGICA DA SUA IDEIA: 5 NAVEGADORES SIMULTÂNEOS ===
+MAX_WORKERS = 5 
+sessao_queue = queue.Queue() # Fila que vai guardar os "crachás"
 
 # =========================================================================
-# O SEU MOTOR INTACTO 
+# O SEU MOTOR INTACTO (LÓGICA DE EXTRAÇÃO PRESERVADA)
 # =========================================================================
-def obter_cookies_login():
-    print("Iniciando Playwright apenas para atravessar a segurança do Login...")
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
-        
-        page.goto("https://itcnet.com.br/auth/keycloak/login.php")
-        page.fill("input#username", USUARIO_ITC)
-        page.fill("input#password", SENHA_ITC)
-        page.click("input#kc-login")
-        
-        page.wait_for_timeout(4000) 
-        
-        cookies = context.cookies()
-        browser.close()
-        
-        return {c['name']: c['value'] for c in cookies}
-
-# AGORA A FUNÇÃO RECEBE A SESSÃO JÁ ABERTA, ECONOMIZANDO TEMPO
-def processar_ncm(ncm_bruta, index, session):
+def processar_ncm_core(ncm_bruta, index, session):
     ncm_bruta = str(ncm_bruta).strip()
     ncm_numeros = ncm_bruta.replace(".", "")
     if len(ncm_numeros) == 8:
@@ -117,8 +101,17 @@ def processar_ncm(ncm_bruta, index, session):
         return index, f"Erro ao processar", f"Erro ao processar"
 
 
+def processar_ncm_fila(ncm_bruta, index):
+    """Pega uma sessão livre da fila, pesquisa, e devolve a sessão para a fila."""
+    sessao_ativa = sessao_queue.get() 
+    try:
+        return processar_ncm_core(ncm_bruta, index, sessao_ativa)
+    finally:
+        sessao_queue.put(sessao_ativa) 
+
+
 # =========================================================================
-# INTERFACE STREAMLIT COM MEMÓRIA DE ESTADO (CONGELA RESULTADOS NA TELA)
+# INTERFACE STREAMLIT COM MEMÓRIA DE ESTADO 
 # =========================================================================
 st.set_page_config(page_title="Validador NCM", page_icon="⚡", layout="centered")
 
@@ -170,25 +163,43 @@ if not st.session_state.processado:
             progress_bar = st.progress(0)
             
             try:
-                status_text.info("🔐 Realizando login seguro no ITC... Aguarde.")
-                cookies_sessao = obter_cookies_login()
+                status_text.info(f"🔐 Aquecendo os motores... Criando {MAX_WORKERS} acessos simultâneos (aguarde ~20 segundos).")
                 
-                # --- OTIMIZAÇÃO APLICADA AQUI ---
-                # Criamos a sessão HTTP UMA VEZ de forma global para manter a conexão aberta (Keep-Alive)
-                sessao_http = requests.Session()
-                sessao_http.cookies.update(cookies_sessao)
-                sessao_http.headers.update({
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-                    "Referer": "https://itcnet.com.br/acesso.php?modulo=orientador_fiscal"
-                })
-                # Visita a página do módulo apenas 1 vez para toda a varredura
-                sessao_http.get("https://itcnet.com.br/acesso.php?modulo=orientador_fiscal", timeout=15)
-                # -------------------------------
+                # --- A GERAÇÃO DO POOL DE CONEXÕES ---
+                with sync_playwright() as p:
+                    browser = p.chromium.launch(headless=True)
+                    for i in range(MAX_WORKERS):
+                        context = browser.new_context()
+                        page = context.new_page()
+                        
+                        page.goto("https://itcnet.com.br/auth/keycloak/login.php")
+                        page.fill("input#username", USUARIO_ITC)
+                        page.fill("input#password", SENHA_ITC)
+                        page.click("input#kc-login")
+                        
+                        page.wait_for_timeout(4000) 
+                        
+                        cookies = context.cookies()
+                        cookie_dict = {c['name']: c['value'] for c in cookies}
+                        context.close()
+                        
+                        # Prepara a sessão de requisição rápida e guarda na fila
+                        sessao_http = requests.Session()
+                        sessao_http.cookies.update(cookie_dict)
+                        sessao_http.headers.update({
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                            "Referer": "https://itcnet.com.br/acesso.php?modulo=orientador_fiscal"
+                        })
+                        sessao_http.get("https://itcnet.com.br/acesso.php?modulo=orientador_fiscal", timeout=15)
+                        sessao_queue.put(sessao_http)
+                    
+                    browser.close()
+                # -------------------------------------
                 
-                status_text.success("Login aprovado! Acelerando consultas via API HTTP (Modo Contínuo)...")
+                status_text.success("🔥 Todos os acessos aprovados! Iniciando varredura em velocidade máxima...")
             except Exception as e:
-                status_text.error(f"Erro no login. Verifique o portal. Detalhe: {e}")
+                status_text.error(f"Erro na criação dos acessos. Verifique o portal. Detalhe: {e}")
                 st.stop()
 
             resultados = {}
@@ -199,8 +210,8 @@ if not st.session_state.processado:
                 for index, row in df.iterrows():
                     if pd.isna(row["NCM"]) or str(row["NCM"]).strip() == "":
                         continue
-                    # Mandamos a sessao_http já aberta para a função
-                    futuro = executor.submit(processar_ncm, row["NCM"], index, sessao_http)
+                    # Agora usamos a função nova que administra a fila
+                    futuro = executor.submit(processar_ncm_fila, row["NCM"], index)
                     futuros.append(futuro)
                     
                 for futuro in concurrent.futures.as_completed(futuros):
