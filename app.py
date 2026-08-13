@@ -13,9 +13,6 @@ os.system("playwright install chromium")
 
 USUARIO_ITC = st.secrets["USUARIO_ITC"]
 SENHA_ITC = st.secrets["SENHA_ITC"]
-
-# === MUDANÇA CRUCIAL AQUI ===
-# Força o robô a ser sequencial (1 por vez) para não embaralhar a memória PHP do servidor ITC
 MAX_WORKERS = 1 
 
 # =========================================================================
@@ -40,16 +37,8 @@ def obter_cookies_login():
         
         return {c['name']: c['value'] for c in cookies}
 
-def processar_ncm(ncm_bruta, index, cookie_dict):
-    session = requests.Session()
-    session.cookies.update(cookie_dict)
-    
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Referer": "https://itcnet.com.br/acesso.php?modulo=orientador_fiscal"
-    })
-    
+# AGORA A FUNÇÃO RECEBE A SESSÃO JÁ ABERTA, ECONOMIZANDO TEMPO
+def processar_ncm(ncm_bruta, index, session):
     ncm_bruta = str(ncm_bruta).strip()
     ncm_numeros = ncm_bruta.replace(".", "")
     if len(ncm_numeros) == 8:
@@ -60,8 +49,7 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
     url_base = "https://itcnet.com.br/orientador_fiscal/index.php"
     
     try:
-        session.get("https://itcnet.com.br/acesso.php?modulo=orientador_fiscal", timeout=15)
-
+        # === PASSO 1: Dispara a Pesquisa ===
         payload_1 = {
             "uf": "28",
             "pesquisa": ncm_formatada, 
@@ -77,6 +65,7 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
             
         tributacao_cod = form_alvo.find("input", attrs={"name": "tributacao_cod"})["value"]
         
+        # === PASSO 2: O Payload Secreto (Simula o clique em Prosseguir) ===
         payload_2 = {
             "uf": "28",
             "estado": "",
@@ -89,6 +78,7 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
         }
         session.post(url_base, data=payload_2, timeout=15) 
         
+        # === PASSO 3: Puxa o texto da Aba ICMS/ST (aba=2) ===
         url_icms_st = f"https://itcnet.com.br/orientador_fiscal/index.php?ncm={ncm_formatada}&aba=2&passo=2"
         res_icms = session.get(url_icms_st, timeout=15)
         soup_icms = BeautifulSoup(res_icms.text, "html.parser")
@@ -96,6 +86,7 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
         painel_icms = soup_icms.find("div", class_="panel-primary")
         texto_icms_st = painel_icms.get_text(separator=' ', strip=True) if painel_icms else ""
         
+        # === PASSO 4: Puxa o texto da Aba PIS/COFINS (aba=3) ===
         url_pis = f"https://itcnet.com.br/orientador_fiscal/index.php?ncm={ncm_formatada}&aba=3&passo=2"
         res_pis = session.get(url_pis, timeout=15)
         soup_pis = BeautifulSoup(res_pis.text, "html.parser")
@@ -103,6 +94,7 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
         painel_pis = soup_pis.find("div", class_="panel-primary")
         texto_pis = painel_pis.get_text(separator=' ', strip=True) if painel_pis else ""
         
+        # === LÓGICA DE FILTRAGEM BLINDADA ===
         texto_pis_min = texto_pis.lower()
         texto_icms_min = texto_icms_st.lower()
         texto_icms_limpo = " ".join(texto_icms_min.split())
@@ -126,96 +118,134 @@ def processar_ncm(ncm_bruta, index, cookie_dict):
 
 
 # =========================================================================
-# INTERFACE STREAMLIT COM FILTRO ANTI-DUPLICIDADE
+# INTERFACE STREAMLIT COM MEMÓRIA DE ESTADO (CONGELA RESULTADOS NA TELA)
 # =========================================================================
 st.set_page_config(page_title="Validador NCM", page_icon="⚡", layout="centered")
 
+if "processado" not in st.session_state:
+    st.session_state.processado = False
+    st.session_state.df_resultado = None
+    st.session_state.planilha_bytes = None
+
 st.title("⚡ Robô Fiscal - Tributação NCM")
-st.markdown("Cole ou digite os códigos NCM abaixo para fazer a varredura em massa.")
 
-texto_ncms = st.text_area(
-    "Digite as NCMs (uma abaixo da outra):", 
-    height=200, 
-    placeholder="Exemplo:\n85365090\n39222000"
-)
+if not st.session_state.processado:
+    st.markdown("Cole ou digite os códigos NCM abaixo para fazer a varredura em massa.")
 
-if st.button("Iniciar Varredura 🚀", type="primary", use_container_width=True):
-    
-    if not texto_ncms.strip():
-        st.warning("Por favor, digite pelo menos uma NCM antes de iniciar.")
-    else:
-        lista_ncms_original = [ncm.strip() for ncm in texto_ncms.split('\n') if ncm.strip()]
-        lista_ncms_unicas = []
-        ncms_vistas = set()
-        
-        for ncm in lista_ncms_original:
-            ncm_numeros = ncm.replace(".", "")
-            if ncm_numeros not in ncms_vistas:
-                ncms_vistas.add(ncm_numeros)
-                lista_ncms_unicas.append(ncm) 
-        
-        duplicadas = len(lista_ncms_original) - len(lista_ncms_unicas)
-        if duplicadas > 0:
-            st.toast(f"🧹 {duplicadas} NCM(s) duplicada(s) removida(s) automaticamente!", icon="✅")
+    texto_ncms = st.text_area(
+        "Digite as NCMs (uma abaixo da outra):", 
+        height=200, 
+        placeholder="Exemplo:\n85365090\n39222000"
+    )
 
-        df = pd.DataFrame({"NCM": lista_ncms_unicas})
+    if st.button("Iniciar Varredura 🚀", type="primary", use_container_width=True):
         
-        if "ICMS_ST" not in df.columns:
-            df["ICMS_ST"] = ""
-        if "PIS_COFINS" not in df.columns:
-            df["PIS_COFINS"] = ""
+        if not texto_ncms.strip():
+            st.warning("Por favor, digite pelo menos uma NCM antes de iniciar.")
+        else:
+            lista_ncms_original = [ncm.strip() for ncm in texto_ncms.split('\n') if ncm.strip()]
+            lista_ncms_unicas = []
+            ncms_vistas = set()
             
-        total_linhas = df['NCM'].notna().sum()
-        
-        status_text = st.empty()
-        progress_bar = st.progress(0)
-        
-        try:
-            status_text.info("🔐 Realizando login seguro no ITC... Aguarde.")
-            cookies_sessao = obter_cookies_login()
-            status_text.success("Login aprovado! Acelerando consultas via API HTTP...")
-        except Exception as e:
-            status_text.error(f"Erro no login. Verifique o portal. Detalhe: {e}")
-            st.stop()
+            for ncm in lista_ncms_original:
+                ncm_numeros = ncm.replace(".", "")
+                if ncm_numeros not in ncms_vistas:
+                    ncms_vistas.add(ncm_numeros)
+                    lista_ncms_unicas.append(ncm) 
+            
+            duplicadas = len(lista_ncms_original) - len(lista_ncms_unicas)
+            if duplicadas > 0:
+                st.toast(f"🧹 {duplicadas} NCM(s) duplicada(s) removida(s) automaticamente!", icon="✅")
 
-        resultados = {}
-        concluidos = 0
-        
-        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futuros = []
-            for index, row in df.iterrows():
-                if pd.isna(row["NCM"]) or str(row["NCM"]).strip() == "":
-                    continue
-                futuro = executor.submit(processar_ncm, row["NCM"], index, cookies_sessao)
-                futuros.append(futuro)
+            df = pd.DataFrame({"NCM": lista_ncms_unicas})
+            
+            if "ICMS_ST" not in df.columns:
+                df["ICMS_ST"] = ""
+            if "PIS_COFINS" not in df.columns:
+                df["PIS_COFINS"] = ""
                 
-            for futuro in concurrent.futures.as_completed(futuros):
-                idx, val_icms, val_pis = futuro.result()
-                resultados[idx] = {"icms": val_icms, "pis": val_pis}
+            total_linhas = df['NCM'].notna().sum()
+            
+            status_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            try:
+                status_text.info("🔐 Realizando login seguro no ITC... Aguarde.")
+                cookies_sessao = obter_cookies_login()
                 
-                concluidos += 1
-                progress = int((concluidos / total_linhas) * 100)
-                progress_bar.progress(progress)
-                status_text.text(f"Processando: {concluidos} de {total_linhas} NCMs concluídas...")
+                # --- OTIMIZAÇÃO APLICADA AQUI ---
+                # Criamos a sessão HTTP UMA VEZ de forma global para manter a conexão aberta (Keep-Alive)
+                sessao_http = requests.Session()
+                sessao_http.cookies.update(cookies_sessao)
+                sessao_http.headers.update({
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Referer": "https://itcnet.com.br/acesso.php?modulo=orientador_fiscal"
+                })
+                # Visita a página do módulo apenas 1 vez para toda a varredura
+                sessao_http.get("https://itcnet.com.br/acesso.php?modulo=orientador_fiscal", timeout=15)
+                # -------------------------------
+                
+                status_text.success("Login aprovado! Acelerando consultas via API HTTP (Modo Contínuo)...")
+            except Exception as e:
+                status_text.error(f"Erro no login. Verifique o portal. Detalhe: {e}")
+                st.stop()
 
-        for idx, dados in resultados.items():
-            df.at[idx, "ICMS_ST"] = dados["icms"]
-            df.at[idx, "PIS_COFINS"] = dados["pis"]
+            resultados = {}
+            concluidos = 0
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futuros = []
+                for index, row in df.iterrows():
+                    if pd.isna(row["NCM"]) or str(row["NCM"]).strip() == "":
+                        continue
+                    # Mandamos a sessao_http já aberta para a função
+                    futuro = executor.submit(processar_ncm, row["NCM"], index, sessao_http)
+                    futuros.append(futuro)
+                    
+                for futuro in concurrent.futures.as_completed(futuros):
+                    idx, val_icms, val_pis = futuro.result()
+                    resultados[idx] = {"icms": val_icms, "pis": val_pis}
+                    
+                    concluidos += 1
+                    progress = int((concluidos / total_linhas) * 100)
+                    progress_bar.progress(progress)
+                    status_text.text(f"Processando: {concluidos} de {total_linhas} NCMs concluídas...")
 
-        status_text.success("✅ Operação concluída em tempo recorde!")
-        
-        st.dataframe(df, use_container_width=True)
-        
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False)
-        processado_xlsx = output.getvalue()
-        
+            for idx, dados in resultados.items():
+                df.at[idx, "ICMS_ST"] = dados["icms"]
+                df.at[idx, "PIS_COFINS"] = dados["pis"]
+            
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+            
+            st.session_state.df_resultado = df
+            st.session_state.planilha_bytes = output.getvalue()
+            st.session_state.processado = True
+            
+            st.rerun()
+
+else:
+    st.success("✅ Varredura concluída com sucesso! Os resultados ficarão congelados aqui.")
+    
+    st.dataframe(st.session_state.df_resultado, use_container_width=True)
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
         st.download_button(
-            label="📥 Baixar Resultado em Planilha",
-            data=processado_xlsx,
+            label="📥 Baixar Resultado",
+            data=st.session_state.planilha_bytes,
             file_name="lista_ncm_atualizada.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             use_container_width=True
         )
+        
+    with col2:
+        if st.button("🔄 Nova Consulta", use_container_width=True):
+            st.session_state.processado = False
+            st.session_state.df_resultado = None
+            st.session_state.planilha_bytes = None
+            st.rerun()
