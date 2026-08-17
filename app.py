@@ -8,6 +8,7 @@ import io
 import os
 import queue
 import re
+import time
 import google.generativeai as genai
 
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
@@ -22,12 +23,12 @@ try:
 except Exception:
     st.error("Chave da API do Gemini não configurada.")
 
-# === A MÁGICA DA SUA IDEIA: NAVEGADORES SIMULTÂNEOS ===
+# === MANTENDO OS 5 NAVEGADORES SIMULTÂNEOS COMO VOCÊ PEDIU ===
 MAX_WORKERS = 5 
 sessao_queue = queue.Queue() 
 
 # =========================================================================
-# FUNÇÕES DE INTELIGÊNCIA ARTIFICIAL (TOMADA DE DECISÃO)
+# FUNÇÕES DE INTELIGÊNCIA ARTIFICIAL (TOMADA DE DECISÃO COM RETENTATIVA)
 # =========================================================================
 def ai_escolher_tributacao(descricao_produto, opcoes_tributacao):
     """Lê as opções de enquadramento do ITC Net e escolhe a que mais bate com o produto."""
@@ -41,16 +42,15 @@ def ai_escolher_tributacao(descricao_produto, opcoes_tributacao):
     Qual desses códigos se adequa melhor ao produto? 
     Responda APENAS com o NÚMERO do código escolhido.
     """
-    # Sistema de Retry (Tenta 3 vezes antes de desistir)
+    # Se bater limite da API (Muitos acessos), tenta 3 vezes antes de desistir
     for tentativa in range(3):
         try:
             res = model.generate_content(prompt).text.strip()
             cod = re.search(r'\d+', res).group()
             return cod if cod in opcoes_tributacao else list(opcoes_tributacao.keys())[0]
         except Exception:
-            time.sleep(3) # Espera 3 segundos se bater no limite da API
+            time.sleep(3) 
             
-    # Se falhar as 3 vezes, escolhe a primeira opção por padrão
     return list(opcoes_tributacao.keys())[0]
 
 def ai_analisar_st(descricao_produto, ncm, texto_st):
@@ -69,15 +69,14 @@ def ai_analisar_st(descricao_produto, ncm, texto_st):
     Responda de forma direta e profissional.
     """
     erro_real = ""
-    # Sistema de Retry (Tenta 3 vezes antes de falhar)
+    # Se bater limite da API (Muitos acessos), tenta 3 vezes antes de desistir
     for tentativa in range(3):
         try:
             return model.generate_content(prompt).text.strip()
         except Exception as e:
             erro_real = str(e)
-            time.sleep(3) # Espera 3 segundos se bater no limite da API
+            time.sleep(3) 
             
-    # Se falhar, agora ele mostra O MOTIVO REAL do erro na planilha
     return f"Erro na IA: {erro_real}"
 
 # =========================================================================
@@ -177,7 +176,8 @@ def processar_ncm_core(ncm_bruta, descricao_produto, uf_codigo, index, session):
         return index, icms_salvar, pis_salvar
 
     except Exception as e:
-        return index, f"Erro ao processar", f"Erro ao processar"
+        # AGORA ELE MOSTRA O ERRO REAL NA PLANILHA (Ex: Timeout, AttributeError)
+        return index, f"Erro Script: {str(e)}", f"Erro Script: {str(e)}"
 
 def processar_ncm_fila(ncm_bruta, descricao_produto, uf_codigo, index):
     sessao_ativa = sessao_queue.get() 
@@ -225,7 +225,8 @@ if not st.session_state.processado:
     
     arquivo_up = st.file_uploader("Upload da Planilha (.xlsx)", type=["xlsx"])
 
-    if st.button("Iniciar Varredura 🚀", type="primary", use_container_width=True):
+    # ATUALIZAÇÃO VISUAL: uso do "width='stretch'" ao invés do deprecado "use_container_width=True"
+    if st.button("Iniciar Varredura 🚀", type="primary", width="stretch"):
         
         if arquivo_up is None:
             st.warning("Por favor, faça o upload da planilha antes de iniciar.")
@@ -323,22 +324,25 @@ if not st.session_state.processado:
 else:
     st.success("✅ Varredura inteligente concluída!")
     
-    st.dataframe(st.session_state.df_resultado, use_container_width=True)
+    # ATUALIZAÇÃO VISUAL NO DATAFRAME
+    st.dataframe(st.session_state.df_resultado, width="stretch")
     
     col1, col2 = st.columns(2)
     
     with col1:
+        # ATUALIZAÇÃO VISUAL NO BOTÃO
         st.download_button(
             label="📥 Baixar Resultado",
             data=st.session_state.planilha_bytes,
             file_name="analise_ncm_ia.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
-            use_container_width=True
+            width="stretch"
         )
         
     with col2:
-        if st.button("🔄 Nova Consulta", use_container_width=True):
+        # ATUALIZAÇÃO VISUAL NO BOTÃO
+        if st.button("🔄 Nova Consulta", width="stretch"):
             st.session_state.processado = False
             st.session_state.df_resultado = None
             st.session_state.planilha_bytes = None
