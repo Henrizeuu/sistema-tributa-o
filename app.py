@@ -41,12 +41,17 @@ def ai_escolher_tributacao(descricao_produto, opcoes_tributacao):
     Qual desses códigos se adequa melhor ao produto? 
     Responda APENAS com o NÚMERO do código escolhido.
     """
-    try:
-        res = model.generate_content(prompt).text.strip()
-        cod = re.search(r'\d+', res).group()
-        return cod if cod in opcoes_tributacao else list(opcoes_tributacao.keys())[0]
-    except:
-        return list(opcoes_tributacao.keys())[0]
+    # Sistema de Retry (Tenta 3 vezes antes de desistir)
+    for tentativa in range(3):
+        try:
+            res = model.generate_content(prompt).text.strip()
+            cod = re.search(r'\d+', res).group()
+            return cod if cod in opcoes_tributacao else list(opcoes_tributacao.keys())[0]
+        except Exception:
+            time.sleep(3) # Espera 3 segundos se bater no limite da API
+            
+    # Se falhar as 3 vezes, escolhe a primeira opção por padrão
+    return list(opcoes_tributacao.keys())[0]
 
 def ai_analisar_st(descricao_produto, ncm, texto_st):
     """Lê o painel de ICMS-ST e verifica se realmente se aplica ao produto."""
@@ -63,10 +68,17 @@ def ai_analisar_st(descricao_produto, ncm, texto_st):
     
     Responda de forma direta e profissional.
     """
-    try:
-        return model.generate_content(prompt).text.strip()
-    except:
-        return "Erro na análise de ST pela IA"
+    erro_real = ""
+    # Sistema de Retry (Tenta 3 vezes antes de falhar)
+    for tentativa in range(3):
+        try:
+            return model.generate_content(prompt).text.strip()
+        except Exception as e:
+            erro_real = str(e)
+            time.sleep(3) # Espera 3 segundos se bater no limite da API
+            
+    # Se falhar, agora ele mostra O MOTIVO REAL do erro na planilha
+    return f"Erro na IA: {erro_real}"
 
 # =========================================================================
 # O MOTOR CORE (AGORA COM IA E ESTADO DINÂMICO)
