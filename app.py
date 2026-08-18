@@ -54,10 +54,14 @@ def ai_analisar_lote(dados_raspados):
     1. AVALIAÇÃO DE COERÊNCIA: A descrição do "produto" tem relação com as "descricao_opcao_portal"?
        - Se o produto NÃO TIVER NENHUMA relação (ex: produto é eletrônico, mas opções são de bebidas), significa que o cliente cadastrou a NCM errada. Neste caso, defina "icms" como "NCM Incompatível", "cest" como "N/A" e "pis" como "NCM Incompatível". Pule para a próxima linha.
     2. Caso haja coerência, escolha o cenário que faz mais sentido.
-    3. Usando APENAS o cenário escolhido, leia o 'texto_icms_bruto'.
-       - Se aplicar ICMS-ST, resuma a regra.
-       - Se isento/fora, responda EXATAMENTE: "Fora da Regra".
-       - Identifique o código CEST (7 dígitos). Sem CEST, responda "N/A".
+    
+    3. AUDITORIA DE ICMS-ST E CEST: Usando APENAS o cenário escolhido, leia atentamente o 'texto_icms_bruto'.
+       - Cruze as regras e EXCEÇÕES descritas no texto do portal com a descrição exata do "produto".
+       - O produto realmente sofre retenção de ST ou se encaixa em alguma exceção/isenção detalhada nas entrelinhas do texto?
+       - Se aplicar ICMS-ST para o perfil exato do produto, resuma a regra.
+       - Se o produto se encaixar em uma exceção mencionada ou o texto for claro sobre não aplicar, responda EXATAMENTE: "Fora da Regra".
+       - Identifique o código CEST (7 dígitos). Se houver vários CESTs no texto, audite e devolva APENAS o que corresponde à descrição do produto. Se não aplicar ST ou não houver CEST, responda "N/A".
+       
     4. Usando APENAS o cenário escolhido, leia o 'texto_pis_bruto'.
        - Se mencionar tributação "monofásica" ou "monofásico", retorne o texto correspondente.
        - Caso contrário, responda EXATAMENTE: "Fora da Regra".
@@ -67,7 +71,7 @@ def ai_analisar_lote(dados_raspados):
       {{
         "id_linha": <mesmo id_linha recebido>,
         "icms": "<regra, Fora da Regra ou NCM Incompatível>",
-        "cest": "<cest ou N/A>",
+        "cest": "<cest exato auditado ou N/A>",
         "pis": "<regra, Fora da Regra ou NCM Incompatível>"
       }}
     ]
