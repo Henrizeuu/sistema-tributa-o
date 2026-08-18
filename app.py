@@ -70,7 +70,7 @@ def ai_analisar_lote(dados_raspados):
     [
       {{
         "id_linha": <mesmo id_linha recebido>,
-        "icms": "<regra, Fora da Regra ou NCM Incompatível>",
+        "icms": "<icms st, Fora da Regra ou NCM Incompatível>",
         "cest": "<cest exato auditado ou N/A>",
         "pis": "<Monofásico, Não Monofásico ou NCM Incompatível>"
       }}
