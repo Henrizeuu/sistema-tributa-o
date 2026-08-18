@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import time
+import json
 import google.generativeai as genai
 
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
@@ -19,16 +20,16 @@ SENHA_ITC = st.secrets["SENHA_ITC"]
 
 try:
     genai.configure(api_key=st.secrets["gemini_api_key"])
-    model = genai.GenerativeModel('gemini-3.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 except Exception:
     st.error("Chave da API do Gemini não configurada.")
 
-# === MANTENDO OS 5 NAVEGADORES SIMULTÂNEOS COMO VOCÊ PEDIU ===
+# === 5 NAVEGADORES SIMULTÂNEOS ===
 MAX_WORKERS = 5 
 sessao_queue = queue.Queue() 
 
 # =========================================================================
-# FUNÇÕES DE INTELIGÊNCIA ARTIFICIAL (TOMADA DE DECISÃO COM RETENTATIVA)
+# FUNÇÕES DE INTELIGÊNCIA ARTIFICIAL (TOMADA DE DECISÃO)
 # =========================================================================
 def ai_escolher_tributacao(descricao_produto, opcoes_tributacao):
     """Lê as opções de enquadramento do ITC Net e escolhe a que mais bate com o produto."""
@@ -42,7 +43,6 @@ def ai_escolher_tributacao(descricao_produto, opcoes_tributacao):
     Qual desses códigos se adequa melhor ao produto? 
     Responda APENAS com o NÚMERO do código escolhido.
     """
-    # Se bater limite da API (Muitos acessos), tenta 3 vezes antes de desistir
     for tentativa in range(3):
         try:
             res = model.generate_content(prompt).text.strip()
@@ -54,33 +54,45 @@ def ai_escolher_tributacao(descricao_produto, opcoes_tributacao):
     return list(opcoes_tributacao.keys())[0]
 
 def ai_analisar_st(descricao_produto, ncm, texto_st):
-    """Lê o painel de ICMS-ST e verifica se realmente se aplica ao produto."""
+    """Lê o painel de ICMS-ST, verifica se aplica e extrai o CEST em JSON."""
     prompt = f"""
     Produto do cliente: "{descricao_produto}" (NCM: {ncm})
     
-    O portal tributário retornou o seguinte texto sobre Substituição Tributária (ST) para esta NCM:
+    Texto sobre ICMS/ST retornado pelo portal:
     {texto_st}
     
     Analise rigorosamente as regras e exceções descritas no texto.
-    1. Este produto específico está sujeito à ST segundo este texto?
-    2. Se SIM, resuma a regra (MVA, alíquota, convênio).
-    3. Se NÃO se enquadrar nas regras (ex: for uma exceção descrita), responda EXATAMENTE: "Fora da Regra".
+    1. Este produto específico está sujeito à ST segundo este texto? Se SIM, resuma a regra. Se NÃO (ex: for uma exceção descrita), responda EXATAMENTE: "Fora da Regra".
+    2. Identifique o código CEST (7 dígitos numéricos) mencionado no texto. Se não houver, responda "N/A".
     
-    Responda de forma direta e profissional.
+    Responda APENAS um JSON válido no formato abaixo:
+    {{
+        "icms": "resumo da regra ou Fora da Regra",
+        "cest": "código numérico ou N/A"
+    }}
     """
     erro_real = ""
-    # Se bater limite da API (Muitos acessos), tenta 3 vezes antes de desistir
     for tentativa in range(3):
         try:
-            return model.generate_content(prompt).text.strip()
+            # Força o Gemini a devolver JSON nativo para não bugar o Python
+            res = model.generate_content(prompt, generation_config={"response_mime_type": "application/json"}).text.strip()
+            
+            # Pinça de segurança para capturar só o bloco JSON
+            match = re.search(r'\{.*\}', res, re.DOTALL)
+            if match:
+                dados = json.loads(match.group(0))
+                return dados.get("icms", "Fora da Regra"), dados.get("cest", "N/A")
+            else:
+                return "Erro de formato da IA", "Erro"
+                
         except Exception as e:
             erro_real = str(e)
             time.sleep(3) 
             
-    return f"Erro na IA: {erro_real}"
+    return f"Erro na IA: {erro_real}", "Erro"
 
 # =========================================================================
-# O MOTOR CORE (AGORA COM IA E ESTADO DINÂMICO)
+# O MOTOR CORE
 # =========================================================================
 def processar_ncm_core(ncm_bruta, descricao_produto, uf_codigo, index, session):
     ncm_bruta = str(ncm_bruta).strip()
@@ -105,9 +117,8 @@ def processar_ncm_core(ncm_bruta, descricao_produto, uf_codigo, index, session):
         
         form_alvo = soup_1.find("form", attrs={"name": "selecionar"})
         if not form_alvo:
-            return index, "NCM não encontrada", "NCM não encontrada"
+            return index, "NCM não encontrada", "NCM não encontrada", "N/A"
             
-        # Extrai todas as opções de rádio (vários enquadramentos)
         opcoes_tributacao = {}
         radios = form_alvo.find_all("input", attrs={"name": "tributacao_cod", "type": "radio"})
         
@@ -122,7 +133,7 @@ def processar_ncm_core(ncm_bruta, descricao_produto, uf_codigo, index, session):
             if hidden:
                 opcoes_tributacao[hidden["value"]] = "Opção Única"
             else:
-                return index, "NCM não encontrada", "NCM não encontrada"
+                return index, "NCM não encontrada", "NCM não encontrada", "N/A"
         
         # === A IA TOMA A DECISÃO DE QUAL ROTA SEGUIR ===
         if len(opcoes_tributacao) > 1:
@@ -143,7 +154,7 @@ def processar_ncm_core(ncm_bruta, descricao_produto, uf_codigo, index, session):
         }
         session.post(url_base, data=payload_2, timeout=15) 
         
-        # === PASSO 3: ICMS/ST (Com Análise Crítica da IA) ===
+        # === PASSO 3: ICMS/ST E EXTRAÇÃO DO CEST ===
         url_icms_st = f"https://itcnet.com.br/orientador_fiscal/index.php?ncm={ncm_formatada}&aba=2&passo=2"
         res_icms = session.get(url_icms_st, timeout=15)
         soup_icms = BeautifulSoup(res_icms.text, "html.parser")
@@ -156,10 +167,10 @@ def processar_ncm_core(ncm_bruta, descricao_produto, uf_codigo, index, session):
         frase_isencao = "não está sujeita ao regime de substituição tributária"
         
         if (frase_isencao not in texto_icms_limpo) and (len(texto_icms_limpo) > 15):
-            # Passa a responsabilidade para a IA analisar se realmente a ST bate com o produto
-            icms_salvar = ai_analisar_st(descricao_produto, ncm_formatada, texto_icms_st)
+            # A IA retorna duas variáveis agora: ICMS e CEST
+            icms_salvar, cest_salvar = ai_analisar_st(descricao_produto, ncm_formatada, texto_icms_st)
         else:
-            icms_salvar = "Fora da Regra"
+            icms_salvar, cest_salvar = "Fora da Regra", "N/A"
         
         # === PASSO 4: PIS/COFINS ===
         url_pis = f"https://itcnet.com.br/orientador_fiscal/index.php?ncm={ncm_formatada}&aba=3&passo=2"
@@ -173,11 +184,11 @@ def processar_ncm_core(ncm_bruta, descricao_produto, uf_codigo, index, session):
         tem_monofasico = any(termo in texto_pis.lower() for termo in termos_monofasico)
         pis_salvar = texto_pis if tem_monofasico else "Fora da Regra"
         
-        return index, icms_salvar, pis_salvar
+        # O retorno agora manda 4 informações para fechar a planilha
+        return index, icms_salvar, pis_salvar, cest_salvar
 
     except Exception as e:
-        # AGORA ELE MOSTRA O ERRO REAL NA PLANILHA (Ex: Timeout, AttributeError)
-        return index, f"Erro Script: {str(e)}", f"Erro Script: {str(e)}"
+        return index, f"Erro Script: {str(e)}", f"Erro Script: {str(e)}", "Erro"
 
 def processar_ncm_fila(ncm_bruta, descricao_produto, uf_codigo, index):
     sessao_ativa = sessao_queue.get() 
@@ -217,15 +228,33 @@ if not st.session_state.processado:
         "Selecione o Estado (UF) para consulta:", 
         options=list(estados_dict.keys()), 
         format_func=lambda x: estados_dict[x],
-        index=1 # Deixa Santa Catarina (28) como default
+        index=1 
     )
     
     st.markdown("---")
-    st.markdown("Suba uma planilha Excel com as colunas **NCM** e **Descricao** para que a Inteligência Artificial possa escolher as regras corretas.")
     
+    # === CRIAÇÃO E DOWNLOAD DA PLANILHA MODELO ===
+    st.subheader("1. Baixe a Planilha Modelo")
+    st.markdown("Para que a IA faça a escolha correta, sua planilha deve conter as colunas **NCM** e **Descricao**.")
+    
+    df_modelo = pd.DataFrame({'NCM': ['22011000', '22021000'], 'Descricao': ['Agua Mineral 500ml', 'Refrigerante Cola 2L']})
+    buffer_modelo = io.BytesIO()
+    with pd.ExcelWriter(buffer_modelo, engine='openpyxl') as writer:
+        df_modelo.to_excel(writer, index=False)
+        
+    st.download_button(
+        label="⬇️ Baixar Planilha Modelo",
+        data=buffer_modelo.getvalue(),
+        file_name="modelo_ncm.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        type="secondary",
+        width="stretch"
+    )
+    
+    st.markdown("---")
+    st.subheader("2. Suba sua Planilha Preenchida")
     arquivo_up = st.file_uploader("Upload da Planilha (.xlsx)", type=["xlsx"])
 
-    # ATUALIZAÇÃO VISUAL: uso do "width='stretch'" ao invés do deprecado "use_container_width=True"
     if st.button("Iniciar Varredura 🚀", type="primary", width="stretch"):
         
         if arquivo_up is None:
@@ -234,15 +263,18 @@ if not st.session_state.processado:
             df = pd.read_excel(arquivo_up)
             
             if "NCM" not in df.columns or "Descricao" not in df.columns:
-                st.error("A planilha precisa ter obrigatoriamente as colunas 'NCM' e 'Descricao'.")
+                st.error("A planilha precisa ter obrigatoriamente as colunas 'NCM' e 'Descricao'. Use o modelo acima!")
                 st.stop()
             
             df = df.dropna(subset=['NCM'])
             
+            # Adiciona a coluna CEST também
             if "ICMS_ST" not in df.columns:
                 df["ICMS_ST"] = ""
             if "PIS_COFINS" not in df.columns:
                 df["PIS_COFINS"] = ""
+            if "CEST" not in df.columns:
+                df["CEST"] = ""
                 
             total_linhas = len(df)
             
@@ -298,9 +330,10 @@ if not st.session_state.processado:
                     futuro = executor.submit(processar_ncm_fila, ncm_val, desc_val, uf_selecionada, index)
                     futuros.append(futuro)
                     
+                # Desempacota o CEST também no recebimento do resultado
                 for futuro in concurrent.futures.as_completed(futuros):
-                    idx, val_icms, val_pis = futuro.result()
-                    resultados[idx] = {"icms": val_icms, "pis": val_pis}
+                    idx, val_icms, val_pis, val_cest = futuro.result()
+                    resultados[idx] = {"icms": val_icms, "pis": val_pis, "cest": val_cest}
                     
                     concluidos += 1
                     progress = int((concluidos / total_linhas) * 100)
@@ -310,6 +343,7 @@ if not st.session_state.processado:
             for idx, dados in resultados.items():
                 df.at[idx, "ICMS_ST"] = dados["icms"]
                 df.at[idx, "PIS_COFINS"] = dados["pis"]
+                df.at[idx, "CEST"] = dados["cest"]
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -324,13 +358,11 @@ if not st.session_state.processado:
 else:
     st.success("✅ Varredura inteligente concluída!")
     
-    # ATUALIZAÇÃO VISUAL NO DATAFRAME
     st.dataframe(st.session_state.df_resultado, width="stretch")
     
     col1, col2 = st.columns(2)
     
     with col1:
-        # ATUALIZAÇÃO VISUAL NO BOTÃO
         st.download_button(
             label="📥 Baixar Resultado",
             data=st.session_state.planilha_bytes,
@@ -341,7 +373,6 @@ else:
         )
         
     with col2:
-        # ATUALIZAÇÃO VISUAL NO BOTÃO
         if st.button("🔄 Nova Consulta", width="stretch"):
             st.session_state.processado = False
             st.session_state.df_resultado = None
