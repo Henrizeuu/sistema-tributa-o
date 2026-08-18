@@ -316,10 +316,25 @@ if not st.session_state.processado:
                     progress_bar.progress(int((concluidos / total_linhas) * 100))
                     status_text.text(f"Auditando bases: {concluidos} de {total_linhas} NCMs extraídas...")
 
-            # FASE 2: AVALIAÇÃO DA IA E CORREÇÃO SISCOMEX
+            # FASE 2: AVALIAÇÃO DA IA E CORREÇÃO SISCOMEX EM LOTES (CHUNKING)
             if lote_para_ia:
-                status_text.info("🧠 Cruzando descrições com regras tributárias (IA em processamento)...")
-                resultados_ia = ai_analisar_lote(lote_para_ia)
+                resultados_ia = []
+                TAMANHO_LOTE = 200
+                
+                for i in range(0, len(lote_para_ia), TAMANHO_LOTE):
+                    pedaco = lote_para_ia[i : i + TAMANHO_LOTE]
+                    fim_lote = min(i + TAMANHO_LOTE, len(lote_para_ia))
+                    
+                    status_text.info(f"🧠 IA cruzando regras tributárias: Avaliando pacote {i + 1} até {fim_lote} de {len(lote_para_ia)}...")
+                    
+                    resposta_pedaco = ai_analisar_lote(pedaco)
+                    resultados_ia.extend(resposta_pedaco)
+                    
+                    # Pausa de 5 segundos para não estourar o Rate Limit, exceto se for o último lote
+                    if fim_lote < len(lote_para_ia):
+                        time.sleep(5)
+                
+                status_text.info("🛠️ Análise concluída. Aplicando resultados e buscando correções oficiais no Siscomex...")
                 
                 for item in resultados_ia:
                     idx = item.get("id_linha")
