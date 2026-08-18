@@ -1,7 +1,7 @@
 streamlit
 pandas
 openpyxl
-requests
 beautifulsoup4
 playwright
-google.generativeai
+google-generativeai
+siscomex-ncm
