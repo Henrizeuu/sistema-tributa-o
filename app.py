@@ -69,34 +69,35 @@ def iniciar_cliente_ncm():
 # INTELIGÊNCIA ARTIFICIAL - AUDITORIA E CORREÇÃO COM ROTAÇÃO DE CHAVES
 # =========================================================================
 def ai_analisar_lote(dados_raspados):
-    """Analisa os cenários e audita rigorosamente a compatibilidade da NCM."""
+    """Audita a coerência fiscal de qualquer produto comparando a descrição com a NCM."""
     prompt = f"""
-    Você é um auditor fiscal federal implacável e especialista em classificação fiscal (NCM). 
-    Analise o seguinte lote JSON de produtos e seus cenários de tributação extraídos do portal.
+    Você é um auditor fiscal federal implacável e especialista sênior em Classificação Fiscal de Mercadorias (NCM/SH).
+    Analise o seguinte lote JSON contendo produtos, suas NCMs informadas e os cenários de tributação extraídos do portal fiscal.
     
-    Para cada produto no lote, faça rigorosamente o seguinte:
+    Para cada produto do lote, execute estritamente a seguinte lógica de validação:
     
-    1. TESTE DE SANIDADE DA NCM (OBRIGATÓRIO): 
-       - Analise a "ncm" informada e a "descricao" do produto. 
-       - A NCM faz sentido lógico e mercadológico para o produto? (Exemplo clássico de Erro: NCM de Bebida/Refrigerante [Capítulo 22] para um produto que é "Ovos" [Capítulo 04], ou NCM de Eletrônico para um alimento).
-       - Se a NCM estiver manifestamente errada ou sem nenhuma relação técnica com o produto, você DEVE retornar obrigatoriamente:
+    1. VALIDAÇÃO SEMÂNTICA E TÉCNICA DA NCM (CRÍTICO):
+       - Compare a descrição comercial exata do "produto" com o código "ncm" informado e com as descrições das opções retornadas pelo portal.
+       - Avalie se a NCM faz sentido comercial, técnico e fiscal para o produto em questão (utilize seu conhecimento profundo sobre a estrutura do Sistema Harmonizado e capítulos da NCM).
+       - Se a NCM informada pertencer a um capítulo/categoria completamente desconexo do produto (ex: classificar alimentos com NCM de eletrônicos/bebidas, vestuário com NCM de químicos, etc.), você DEVE classificar o item como incompatível.
+       - Se for incompatível, retorne obrigatoriamente:
          - "icms": "NCM Incompatível"
          - "cest": "N/A"
          - "pis": "NCM Incompatível"
-         - E PARE DE PROCESSAR ESTE ITEM.
-    
-    2. AVALIAÇÃO DE CENÁRIO (Apenas se a NCM for coerente):
-       - Escolha o enquadramento do portal que melhor se adapta ao produto.
-    
-    3. AUDITORIA DE ICMS-ST E CEST: 
-       - Leia o 'texto_icms_bruto' do cenário escolhido.
-       - Se aplicar ICMS-ST, responda: "ICMS ST". Caso contrário: "Não".
-       - Identifique o código CEST de 7 dígitos correspondente ou responda "N/A".
+       - E encerre a análise deste item.
        
-    4. AUDITORIA DE PIS/COFINS: 
-       - Leia o 'texto_pis_bruto'. Se mencionar "monofásica" ou "monofásico", responda: "Monofásico". Caso contrário: "Não Monofásico".
+    2. SELEÇÃO DE ENQUADRAMENTO (Caso coerente):
+       - Selecione o cenário do portal que melhor descreve o enquadramento aplicável ao produto.
+       
+    3. AUDITORIA DE ICMS-ST E CEST:
+       - Leia o 'texto_icms_bruto' do cenário escolhido.
+       - Se aplicar substituição tributária para o perfil exato do produto, responda: "ICMS ST". Se houver isenção ou não se aplicar, responda: "Não".
+       - Identifique e extraia o código CEST de 7 dígitos correspondente. Se não houver, responda "N/A".
+       
+    4. AUDITORIA DE PIS/COFINS:
+       - Leia o 'texto_pis_bruto'. Se o regime for monofásico, responda: "Monofásico". Caso contrário: "Não Monofásico".
     
-    Devolva ESTRITAMENTE um array JSON nativo neste exato formato:
+    Devolva ESTRITAMENTE um array JSON nativo neste exato formato (sem marcações markdown extras, apenas o JSON):
     [
       {{
         "id_linha": <mesmo id_linha recebido>,
@@ -110,7 +111,8 @@ def ai_analisar_lote(dados_raspados):
     {json.dumps(dados_raspados, ensure_ascii=False)}
     """
     
-    for _ in range(3):
+    tentativas_totais = max(len(CHAVES_GEMINI) * 2, 6)
+    for _ in range(tentativas_totais):
         model_rotativo = obter_modelo_rotacionado()
         if not model_rotativo:
             break
@@ -123,7 +125,10 @@ def ai_analisar_lote(dados_raspados):
             match = re.search(r'\[.*\]', res, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
-        except Exception:
+        except Exception as e:
+            erro_str = str(e)
+            if "429" in erro_str or "ResourceExhausted" in erro_str or "quota" in erro_str.lower():
+                continue
             time.sleep(2)
             
     return []
