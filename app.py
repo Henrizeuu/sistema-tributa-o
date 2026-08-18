@@ -11,6 +11,8 @@ import re
 import time
 import json
 import google.generativeai as genai
+from ncm.client import FetchNcm
+from ncm.exceptions import NcmDownloadException
 
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
 os.system("playwright install chromium")
@@ -29,33 +31,44 @@ MAX_WORKERS = 5
 sessao_queue = queue.Queue() 
 
 # =========================================================================
-# INTELIGÊNCIA ARTIFICIAL - AVALIAÇÃO EM LOTE (BULK)
+# BANCO DE DADOS SISCOMEX (CACHE OTIMIZADO)
+# =========================================================================
+@st.cache_resource
+def iniciar_cliente_ncm():
+    """Inicializa o cliente da biblioteca siscomex-ncm uma única vez por sessão."""
+    try:
+        return FetchNcm()
+    except Exception as e:
+        st.error(f"Erro ao inicializar o banco do Siscomex: {e}")
+        return None
+
+# =========================================================================
+# INTELIGÊNCIA ARTIFICIAL - AUDITORIA E CORREÇÃO
 # =========================================================================
 def ai_analisar_lote(dados_raspados):
-    """
-    Recebe um JSON com todos os produtos e todos os cenários possíveis extraídos do portal.
-    O Gemini atua como analista fiscal: escolhe o cenário correto cruzando a descrição e extrai as regras.
-    """
+    """Analisa os cenários e audita se a NCM do cliente faz sentido."""
     prompt = f"""
-    Você é um analista fiscal experiente. Analise o seguinte lote JSON de produtos e seus cenários de tributação extraídos do portal.
+    Você é um auditor fiscal experiente. Analise o seguinte lote JSON de produtos e seus cenários de tributação extraídos do portal.
     
     Para cada produto no lote, execute a seguinte lógica:
-    1. Compare o nome do "produto" com as "descricao_opcao_portal" de cada cenário disponível. Identifique qual cenário faz mais sentido.
-    2. Usando APENAS o cenário escolhido, leia o 'texto_icms_bruto'.
-       - Se o texto indicar que se aplica ICMS-ST, resuma a regra.
-       - Se o texto indicar isenção (ex: "não está sujeita ao regime"), responda EXATAMENTE: "Fora da Regra".
-       - Identifique o código CEST (7 dígitos numéricos). Se não houver, responda "N/A".
-    3. Usando APENAS o cenário escolhido, leia o 'texto_pis_bruto'.
+    1. AVALIAÇÃO DE COERÊNCIA: A descrição do "produto" tem relação com as "descricao_opcao_portal"?
+       - Se o produto NÃO TIVER NENHUMA relação (ex: produto é eletrônico, mas opções são de bebidas), significa que o cliente cadastrou a NCM errada. Neste caso, defina "icms" como "NCM Incompatível", "cest" como "N/A" e "pis" como "NCM Incompatível". Pule para a próxima linha.
+    2. Caso haja coerência, escolha o cenário que faz mais sentido.
+    3. Usando APENAS o cenário escolhido, leia o 'texto_icms_bruto'.
+       - Se aplicar ICMS-ST, resuma a regra.
+       - Se isento/fora, responda EXATAMENTE: "Fora da Regra".
+       - Identifique o código CEST (7 dígitos). Sem CEST, responda "N/A".
+    4. Usando APENAS o cenário escolhido, leia o 'texto_pis_bruto'.
        - Se mencionar tributação "monofásica" ou "monofásico", retorne o texto correspondente.
        - Caso contrário, responda EXATAMENTE: "Fora da Regra".
     
-    Devolva ESTRITAMENTE um array JSON nativo neste exato formato (sem marcações markdown, apenas o JSON puro):
+    Devolva ESTRITAMENTE um array JSON nativo neste exato formato:
     [
       {{
         "id_linha": <mesmo id_linha recebido>,
-        "icms": "<resumo da regra ou Fora da Regra>",
-        "cest": "<código numérico ou N/A>",
-        "pis": "<texto pis ou Fora da Regra>"
+        "icms": "<regra, Fora da Regra ou NCM Incompatível>",
+        "cest": "<cest ou N/A>",
+        "pis": "<regra, Fora da Regra ou NCM Incompatível>"
       }}
     ]
     
@@ -65,29 +78,47 @@ def ai_analisar_lote(dados_raspados):
     
     for tentativa in range(3):
         try:
-            # Enforça a saída em JSON nativo para evitar alucinações de formatação
             res = model.generate_content(
                 prompt, 
                 generation_config={"response_mime_type": "application/json"}
             ).text.strip()
             
-            # Limpeza de segurança caso a IA mande texto antes do JSON
             match = re.search(r'\[.*\]', res, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
             else:
                 raise ValueError("JSON não encontrado na resposta.")
-                
-        except Exception as e:
+        except Exception:
             time.sleep(4)
             
-    return [] # Retorna vazio se falhar todas as tentativas
+    return []
+
+def sugerir_ncm_correta(descricao_produto, ncm_client):
+    """Pede para a IA sugerir a NCM correta e valida na biblioteca oficial."""
+    prompt = f"Qual é a NCM (código de 8 dígitos) mais adequada para o produto: '{descricao_produto}'? Responda APENAS com os 8 números, sem nenhum texto extra ou formatação."
+    
+    ncm_sugerida = ""
+    try:
+        res = model.generate_content(prompt).text.strip()
+        ncm_sugerida = re.sub(r'\D', '', res)
+        
+        if len(ncm_sugerida) == 8 and ncm_client:
+            # Consulta a biblioteca oficial
+            ncm_obj = ncm_client.get_codigo_ncm(ncm_sugerida)
+            if ncm_obj and ncm_obj.descricao_ncm:
+                desc_limpa = ncm_obj.descricao_ncm.lstrip('- ').strip()
+                return f"{ncm_sugerida} ({desc_limpa})"
+            else:
+                return f"{ncm_sugerida} (Não localizada no Siscomex)"
+        return f"{ncm_sugerida} (Formato inválido)"
+    except Exception:
+        # Se a API ou a biblioteca falharem na busca pontual
+        return f"{ncm_sugerida} (Erro ao validar no Siscomex)"
 
 # =========================================================================
 # O MOTOR CORE - RASPAGEM CEGA
 # =========================================================================
 def raspar_cenarios_ncm(ncm_bruta, descricao_produto, uf_codigo, index, session):
-    """Raspa todas as possibilidades de uma NCM no portal, sem tomar decisão."""
     ncm_bruta = str(ncm_bruta).strip()
     ncm_numeros = ncm_bruta.replace(".", "")
     if len(ncm_numeros) == 8:
@@ -98,19 +129,13 @@ def raspar_cenarios_ncm(ncm_bruta, descricao_produto, uf_codigo, index, session)
     url_base = "https://itcnet.com.br/orientador_fiscal/index.php"
     
     try:
-        # === PASSO 1: Dispara a Pesquisa ===
-        payload_1 = {
-            "uf": uf_codigo,
-            "pesquisa": ncm_formatada, 
-            "passo": "1",
-            "local": "1"
-        }
+        payload_1 = {"uf": uf_codigo, "pesquisa": ncm_formatada, "passo": "1", "local": "1"}
         res_passo1 = session.post(url_base, data=payload_1, timeout=15)
         soup_1 = BeautifulSoup(res_passo1.text, "html.parser")
         
         form_alvo = soup_1.find("form", attrs={"name": "selecionar"})
         if not form_alvo:
-            return index, {"erro": "NCM não encontrada"}
+            return index, {"erro": "NCM não encontrada no portal ITC"}
             
         opcoes_tributacao = {}
         radios = form_alvo.find_all("input", attrs={"name": "tributacao_cod", "type": "radio"})
@@ -125,39 +150,24 @@ def raspar_cenarios_ncm(ncm_bruta, descricao_produto, uf_codigo, index, session)
             if hidden:
                 opcoes_tributacao[hidden["value"]] = "Opção Única"
             else:
-                return index, {"erro": "NCM não encontrada"}
+                return index, {"erro": "NCM não encontrada no portal ITC"}
         
         cenarios_extraidos = []
-        
-        # === NAVEGA EM TODAS AS OPÇÕES (RASPAGEM TOTAL) ===
         for cod_tributacao, desc_opcao in opcoes_tributacao.items():
-            
-            # Aciona o Passo 2 para este código específico
             payload_2 = {
-                "uf": uf_codigo,
-                "estado": "",
-                "pesquisa": ncm_formatada,
-                "tributacao_cod": cod_tributacao,
-                "passo": "2",
-                "local": "1",
-                "posicao_tipi": "1",
-                "descricao": ""
+                "uf": uf_codigo, "estado": "", "pesquisa": ncm_formatada,
+                "tributacao_cod": cod_tributacao, "passo": "2", "local": "1",
+                "posicao_tipi": "1", "descricao": ""
             }
             session.post(url_base, data=payload_2, timeout=15) 
             
-            # Extrai ST (Aba 2)
             url_icms_st = f"https://itcnet.com.br/orientador_fiscal/index.php?ncm={ncm_formatada}&aba=2&passo=2"
-            res_icms = session.get(url_icms_st, timeout=15)
-            soup_icms = BeautifulSoup(res_icms.text, "html.parser")
-            painel_icms = soup_icms.find("div", class_="panel-primary")
-            texto_icms_st = painel_icms.get_text(separator=' ', strip=True) if painel_icms else ""
+            texto_icms_st = BeautifulSoup(session.get(url_icms_st, timeout=15).text, "html.parser").find("div", class_="panel-primary")
+            texto_icms_st = texto_icms_st.get_text(separator=' ', strip=True) if texto_icms_st else ""
             
-            # Extrai PIS/COFINS (Aba 3)
             url_pis = f"https://itcnet.com.br/orientador_fiscal/index.php?ncm={ncm_formatada}&aba=3&passo=2"
-            res_pis = session.get(url_pis, timeout=15)
-            soup_pis = BeautifulSoup(res_pis.text, "html.parser")
-            painel_pis = soup_pis.find("div", class_="panel-primary")
-            texto_pis = painel_pis.get_text(separator=' ', strip=True) if painel_pis else ""
+            texto_pis = BeautifulSoup(session.get(url_pis, timeout=15).text, "html.parser").find("div", class_="panel-primary")
+            texto_pis = texto_pis.get_text(separator=' ', strip=True) if texto_pis else ""
             
             cenarios_extraidos.append({
                 "codigo": cod_tributacao,
@@ -186,26 +196,23 @@ def processar_ncm_fila(ncm_bruta, descricao_produto, uf_codigo, index):
 # =========================================================================
 # INTERFACE STREAMLIT
 # =========================================================================
-st.set_page_config(page_title="Validador NCM Inteligente", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="Auditor Fiscal IA", page_icon="⚡", layout="wide")
 
 if "processado" not in st.session_state:
     st.session_state.processado = False
     st.session_state.df_resultado = None
     st.session_state.planilha_bytes = None
 
-st.title("⚡ Robô Fiscal - Tributação com IA (Processamento em Lote)")
+st.title("⚡ Auditor Fiscal IA - Tributação & NCM em Lote")
+
+# Instancia o cliente da biblioteca do Siscomex (aproveitando o cache)
+cliente_ncm = iniciar_cliente_ncm()
 
 if not st.session_state.processado:
-    
     estados_dict = {
-        "1": "Santa Catarina - Nova versão",
-        "28": "Santa Catarina",
-        "2": "Rio Grande do Sul",
-        "3": "Paraná",
-        "4": "São Paulo",
-        "5": "Minas Gerais",
-        "6": "Rio de Janeiro",
-        "9": "Espírito Santo - Nova versão"
+        "1": "Santa Catarina - Nova versão", "28": "Santa Catarina",
+        "2": "Rio Grande do Sul", "3": "Paraná", "4": "São Paulo",
+        "5": "Minas Gerais", "6": "Rio de Janeiro", "9": "Espírito Santo - Nova versão"
     }
     
     uf_selecionada = st.selectbox(
@@ -216,51 +223,44 @@ if not st.session_state.processado:
     )
     
     st.markdown("---")
-    
     st.subheader("1. Baixe a Planilha Modelo")
-    st.markdown("Para que a IA faça a escolha correta, sua planilha deve conter as colunas **NCM** e **Descricao**.")
+    st.markdown("A planilha deve conter as colunas **NCM** e **Descricao**.")
     
-    df_modelo = pd.DataFrame({'NCM': ['22011000', '22021000'], 'Descricao': ['Agua Mineral 500ml', 'Refrigerante Cola 2L']})
+    df_modelo = pd.DataFrame({'NCM': ['22011000', '84713012'], 'Descricao': ['Agua Mineral 500ml', 'Pneu de Moto aro 18 (Erro Proposital)']})
     buffer_modelo = io.BytesIO()
     with pd.ExcelWriter(buffer_modelo, engine='openpyxl') as writer:
         df_modelo.to_excel(writer, index=False)
         
-    st.download_button(
-        label="⬇️ Baixar Planilha Modelo",
-        data=buffer_modelo.getvalue(),
-        file_name="modelo_ncm.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="secondary",
-        width="stretch"
-    )
+    st.download_button(label="⬇️ Baixar Planilha Modelo", data=buffer_modelo.getvalue(), file_name="modelo_ncm.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="secondary", width="stretch")
     
     st.markdown("---")
-    st.subheader("2. Suba sua Planilha Preenchida")
+    st.subheader("2. Suba a Base de Produtos")
     arquivo_up = st.file_uploader("Upload da Planilha (.xlsx)", type=["xlsx"])
 
-    if st.button("Iniciar Varredura 🚀", type="primary", width="stretch"):
-        
+    if st.button("Iniciar Auditoria 🚀", type="primary", width="stretch"):
         if arquivo_up is None:
-            st.warning("Por favor, faça o upload da planilha antes de iniciar.")
+            st.warning("Faça o upload da planilha.")
         else:
             df = pd.read_excel(arquivo_up)
             
             if "NCM" not in df.columns or "Descricao" not in df.columns:
-                st.error("A planilha precisa ter obrigatoriamente as colunas 'NCM' e 'Descricao'. Use o modelo acima!")
+                st.error("A planilha precisa ter obrigatoriamente as colunas 'NCM' e 'Descricao'.")
                 st.stop()
             
             df = df.dropna(subset=['NCM'])
             
+            # Prepara as colunas
             if "ICMS_ST" not in df.columns: df["ICMS_ST"] = ""
             if "PIS_COFINS" not in df.columns: df["PIS_COFINS"] = ""
             if "CEST" not in df.columns: df["CEST"] = ""
+            if "NCM_Sugerida_Siscomex" not in df.columns: df["NCM_Sugerida_Siscomex"] = ""
                 
             total_linhas = len(df)
             status_text = st.empty()
             progress_bar = st.progress(0)
             
             try:
-                status_text.info(f"🔐 Aquecendo os motores... Criando {MAX_WORKERS} acessos simultâneos.")
+                status_text.info(f"🔐 Inicializando robôs... Criando {MAX_WORKERS} conexões.")
                 
                 with sync_playwright() as p:
                     browser = p.chromium.launch(headless=True)
@@ -280,15 +280,11 @@ if not st.session_state.processado:
                         
                         sessao_http = requests.Session()
                         sessao_http.cookies.update(cookie_dict)
-                        sessao_http.headers.update({
-                            "User-Agent": "Mozilla/5.0",
-                            "Referer": "https://itcnet.com.br/acesso.php?modulo=orientador_fiscal"
-                        })
+                        sessao_http.headers.update({"User-Agent": "Mozilla/5.0", "Referer": "https://itcnet.com.br/"})
                         sessao_queue.put(sessao_http)
                     
                     browser.close()
-                
-                status_text.success("🔥 Todos os acessos aprovados! Iniciando extração de dados no portal...")
+                status_text.success("🔥 Conexões criadas! Iniciando varredura profunda no portal...")
             except Exception as e:
                 status_text.error(f"Erro na criação dos acessos. Detalhe: {e}")
                 st.stop()
@@ -307,7 +303,6 @@ if not st.session_state.processado:
                     
                 for futuro in concurrent.futures.as_completed(futuros):
                     idx, resultado = futuro.result()
-                    
                     if "erro" in resultado:
                         erros_raspagem[idx] = resultado["erro"]
                     else:
@@ -315,28 +310,34 @@ if not st.session_state.processado:
                         
                     concluidos += 1
                     progress_bar.progress(int((concluidos / total_linhas) * 100))
-                    status_text.text(f"Raspando portal: {concluidos} de {total_linhas} NCMs extraídas...")
+                    status_text.text(f"Auditando bases: {concluidos} de {total_linhas} NCMs extraídas...")
 
-            # FASE 2: AVALIAÇÃO DA IA EM LOTE
+            # FASE 2: AVALIAÇÃO DA IA E CORREÇÃO SISCOMEX
             if lote_para_ia:
-                status_text.info("🧠 Raspagem concluída. Enviando lote completo para a Inteligência Artificial avaliar (isso leva alguns segundos)...")
+                status_text.info("🧠 Cruzando descrições com regras tributárias (IA em processamento)...")
                 resultados_ia = ai_analisar_lote(lote_para_ia)
                 
-                # Preenche a planilha com o retorno da IA
                 for item in resultados_ia:
                     idx = item.get("id_linha")
                     if idx is not None and idx in df.index:
-                        df.at[idx, "ICMS_ST"] = item.get("icms", "Erro IA")
+                        status_icms = item.get("icms", "Erro IA")
+                        df.at[idx, "ICMS_ST"] = status_icms
                         df.at[idx, "CEST"] = item.get("cest", "Erro IA")
                         df.at[idx, "PIS_COFINS"] = item.get("pis", "Erro IA")
-            
-            # Preenche as linhas que deram erro logo na raspagem (NCM não encontrada, etc)
+                        
+                        # Gatilho de Autocorreção: NCM Errada!
+                        if "Incompatível" in status_icms:
+                            status_text.warning(f"⚠️ Alerta: NCM errada detectada na linha {idx}. Buscando correção oficial...")
+                            desc_cliente = df.at[idx, "Descricao"]
+                            sugestao = sugerir_ncm_correta(desc_cliente, cliente_ncm)
+                            df.at[idx, "NCM_Sugerida_Siscomex"] = sugestao
+
             for idx, msg_erro in erros_raspagem.items():
                 df.at[idx, "ICMS_ST"] = msg_erro
                 df.at[idx, "CEST"] = "N/A"
                 df.at[idx, "PIS_COFINS"] = msg_erro
             
-            status_text.success("✅ Relatório consolidado e avaliado com sucesso!")
+            status_text.success("✅ Relatório auditado com sucesso!")
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -349,22 +350,22 @@ if not st.session_state.processado:
             st.rerun()
 
 else:
-    st.success("✅ Varredura inteligente concluída!")
+    st.success("✅ Auditoria inteligente concluída!")
     
     st.dataframe(st.session_state.df_resultado, width="stretch")
     
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
-            label="📥 Baixar Resultado",
+            label="📥 Baixar Auditoria Final",
             data=st.session_state.planilha_bytes,
-            file_name="analise_ncm_ia_lote.xlsx",
+            file_name="auditoria_fiscal_inteligente.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             width="stretch"
         )
     with col2:
-        if st.button("🔄 Nova Consulta", width="stretch"):
+        if st.button("🔄 Nova Auditoria", width="stretch"):
             st.session_state.processado = False
             st.session_state.df_resultado = None
             st.session_state.planilha_bytes = None
