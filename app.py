@@ -58,13 +58,13 @@ def ai_analisar_lote(dados_raspados):
     3. AUDITORIA DE ICMS-ST E CEST: Usando APENAS o cenário escolhido, leia atentamente o 'texto_icms_bruto'.
        - Cruze as regras e EXCEÇÕES descritas no texto do portal com a descrição exata do "produto".
        - O produto realmente sofre retenção de ST ou se encaixa em alguma exceção/isenção detalhada nas entrelinhas do texto?
-       - Se aplicar ICMS-ST para o perfil exato do produto, resuma a regra.
+       - Se aplicar ICMS-ST para o perfil exato do produto, resuma a regra de forma clara.
        - Se o produto se encaixar em uma exceção mencionada ou o texto for claro sobre não aplicar, responda EXATAMENTE: "Fora da Regra".
        - Identifique o código CEST (7 dígitos). Se houver vários CESTs no texto, audite e devolva APENAS o que corresponde à descrição do produto. Se não aplicar ST ou não houver CEST, responda "N/A".
        
-    4. Usando APENAS o cenário escolhido, leia o 'texto_pis_bruto'.
-       - Se mencionar tributação "monofásica" ou "monofásico", retorne o texto correspondente.
-       - Caso contrário, responda EXATAMENTE: "Fora da Regra".
+    4. AUDITORIA DE PIS/COFINS: Usando APENAS o cenário escolhido, leia o 'texto_pis_bruto'.
+       - Se o texto mencionar que a tributação é "monofásica" ou "monofásico", responda EXATAMENTE: "Monofásico".
+       - Caso contrário, responda EXATAMENTE: "Não Monofásico".
     
     Devolva ESTRITAMENTE um array JSON nativo neste exato formato:
     [
@@ -72,7 +72,7 @@ def ai_analisar_lote(dados_raspados):
         "id_linha": <mesmo id_linha recebido>,
         "icms": "<regra, Fora da Regra ou NCM Incompatível>",
         "cest": "<cest exato auditado ou N/A>",
-        "pis": "<regra, Fora da Regra ou NCM Incompatível>"
+        "pis": "<Monofásico, Não Monofásico ou NCM Incompatível>"
       }}
     ]
     
