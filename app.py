@@ -18,6 +18,10 @@ from ncm.exceptions import NcmDownloadException
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
 os.system("playwright install chromium")
 
+# === CREDENCIAIS DO PORTAL ITC NET (ESTAVAM FALTANDO) ===
+USUARIO_ITC = st.secrets["USUARIO_ITC"]
+SENHA_ITC = st.secrets["SENHA_ITC"]
+
 # =========================================================================
 # CONFIGURAÇÃO DE MÚLTIPLAS CHAVES API (ROTAÇÃO CONTÍNUA)
 # =========================================================================
