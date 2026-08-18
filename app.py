@@ -20,7 +20,7 @@ SENHA_ITC = st.secrets["SENHA_ITC"]
 
 try:
     genai.configure(api_key=st.secrets["gemini_api_key"])
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-3.5-flash-lite')
 except Exception:
     st.error("Chave da API do Gemini não configurada.")
 
