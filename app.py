@@ -10,6 +10,7 @@ import queue
 import re
 import time
 import json
+import itertools
 import google.generativeai as genai
 from ncm.client import FetchNcm
 from ncm.exceptions import NcmDownloadException
@@ -17,14 +18,32 @@ from ncm.exceptions import NcmDownloadException
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
 os.system("playwright install chromium")
 
-USUARIO_ITC = st.secrets["USUARIO_ITC"]
-SENHA_ITC = st.secrets["SENHA_ITC"]
+# =========================================================================
+# CONFIGURAÇÃO DE MÚLTIPLAS CHAVES API (ROTAÇÃO CONTÍNUA)
+# =========================================================================
+CHAVES_GEMINI = []
+for i in range(1, 6):  # Configurado para buscar até 5 chaves no secrets
+    chave = st.secrets.get(f"gemini_api_key_{i}") or st.secrets.get("gemini_api_key" if i == 1 else None)
+    if chave and chave not in CHAVES_GEMINI:
+        CHAVES_GEMINI.append(chave)
 
-try:
-    genai.configure(api_key=st.secrets["gemini_api_key"])
-    model = genai.GenerativeModel('gemini-3.5-flash-lite')
-except Exception:
-    st.error("Chave da API do Gemini não configurada.")
+# Fallback caso tenha cadastrado apenas a chave padrão "gemini_api_key"
+if not CHAVES_GEMINI and "gemini_api_key" in st.secrets:
+    CHAVES_GEMINI.append(st.secrets["gemini_api_key"])
+
+if not CHAVES_GEMINI:
+    st.error("Nenhuma chave da API do Gemini foi configurada nos segredos do Streamlit.")
+
+# Cria um iterador circular para alternar as chaves infinitamente
+roleta_chaves = itertools.cycle(CHAVES_GEMINI) if CHAVES_GEMINI else None
+
+def obter_modelo_rotacionado():
+    """Retorna uma instância do modelo configurada com a próxima chave da roleta."""
+    if not roleta_chaves:
+        return None
+    chave_atual = next(roleta_chaves)
+    genai.configure(api_key=chave_atual)
+    return genai.GenerativeModel('gemini-3.5-flash-lite')
 
 # === 5 NAVEGADORES SIMULTÂNEOS ===
 MAX_WORKERS = 5 
@@ -43,10 +62,10 @@ def iniciar_cliente_ncm():
         return None
 
 # =========================================================================
-# INTELIGÊNCIA ARTIFICIAL - AUDITORIA E CORREÇÃO
+# INTELIGÊNCIA ARTIFICIAL - AUDITORIA E CORREÇÃO COM ROTAÇÃO DE CHAVES
 # =========================================================================
 def ai_analisar_lote(dados_raspados):
-    """Analisa os cenários e audita se a NCM do cliente faz sentido."""
+    """Analisa os cenários em lote, alternando chaves automaticamente caso bata em rate limit."""
     prompt = f"""
     Você é um auditor fiscal experiente. Analise o seguinte lote JSON de produtos e seus cenários de tributação extraídos do portal.
     
@@ -80,9 +99,14 @@ def ai_analisar_lote(dados_raspados):
     {json.dumps(dados_raspados, ensure_ascii=False)}
     """
     
-    for tentativa in range(3):
+    # Tenta executar rodando entre as chaves disponíveis se houver erro de cota (429)
+    tentativas_totais = max(len(CHAVES_GEMINI) * 2, 6)
+    for _ in range(tentativas_totais):
+        model_rotativo = obter_modelo_rotacionado()
+        if not model_rotativo:
+            break
         try:
-            res = model.generate_content(
+            res = model_rotativo.generate_content(
                 prompt, 
                 generation_config={"response_mime_type": "application/json"}
             ).text.strip()
@@ -92,32 +116,44 @@ def ai_analisar_lote(dados_raspados):
                 return json.loads(match.group(0))
             else:
                 raise ValueError("JSON não encontrado na resposta.")
-        except Exception:
-            time.sleep(4)
+        except Exception as e:
+            # Se for erro de limite de taxa ou cota, o loop pega instantaneamente a próxima chave
+            erro_str = str(e)
+            if "429" in erro_str or "ResourceExhausted" in erro_str or "quota" in erro_str.lower():
+                continue
+            time.sleep(2)
             
     return []
 
 def sugerir_ncm_correta(descricao_produto, ncm_client):
-    """Pede para a IA sugerir a NCM correta e valida na biblioteca oficial."""
+    """Pede para a IA sugerir a NCM correta utilizando rotação e valida na biblioteca oficial."""
     prompt = f"Qual é a NCM (código de 8 dígitos) mais adequada para o produto: '{descricao_produto}'? Responda APENAS com os 8 números, sem nenhum texto extra ou formatação."
     
     ncm_sugerida = ""
-    try:
-        res = model.generate_content(prompt).text.strip()
-        ncm_sugerida = re.sub(r'\D', '', res)
-        
-        if len(ncm_sugerida) == 8 and ncm_client:
-            # Consulta a biblioteca oficial
-            ncm_obj = ncm_client.get_codigo_ncm(ncm_sugerida)
-            if ncm_obj and ncm_obj.descricao_ncm:
-                desc_limpa = ncm_obj.descricao_ncm.lstrip('- ').strip()
-                return f"{ncm_sugerida} ({desc_limpa})"
-            else:
-                return f"{ncm_sugerida} (Não localizada no Siscomex)"
-        return f"{ncm_sugerida} (Formato inválido)"
-    except Exception:
-        # Se a API ou a biblioteca falharem na busca pontual
-        return f"{ncm_sugerida} (Erro ao validar no Siscomex)"
+    for _ in range(max(len(CHAVES_GEMINI), 2)):
+        model_rotativo = obter_modelo_rotacionado()
+        if not model_rotativo:
+            break
+        try:
+            res = model_rotativo.generate_content(prompt).text.strip()
+            ncm_sugerida = re.sub(r'\D', '', res)
+            
+            if len(ncm_sugerida) == 8 and ncm_client:
+                ncm_obj = ncm_client.get_codigo_ncm(ncm_sugerida)
+                if ncm_obj and ncm_obj.descricao_ncm:
+                    desc_limpa = ncm_obj.descricao_ncm.lstrip('- ').strip()
+                    return f"{ncm_sugerida} ({desc_limpa})"
+                else:
+                    return f"{ncm_sugerida} (Não localizada no Siscomex)"
+            elif len(ncm_sugerida) == 8:
+                return f"{ncm_sugerida} (Formato inválido)"
+        except Exception as e:
+            erro_str = str(e)
+            if "429" in erro_str or "ResourceExhausted" in erro_str:
+                continue
+            break
+            
+    return f"{ncm_sugerida or 'Erro'} (Erro ao validar no Siscomex)"
 
 # =========================================================================
 # O MOTOR CORE - RASPAGEM CEGA
@@ -207,7 +243,7 @@ if "processado" not in st.session_state:
     st.session_state.df_resultado = None
     st.session_state.planilha_bytes = None
 
-st.title("⚡ Auditor Fiscal IA - Tributação & NCM em Lote")
+st.title("⚡ Auditor Fiscal IA - Tributação & NCM em Lote (Multi-API)")
 
 # Instancia o cliente da biblioteca do Siscomex (aproveitando o cache)
 cliente_ncm = iniciar_cliente_ncm()
@@ -316,7 +352,7 @@ if not st.session_state.processado:
                     progress_bar.progress(int((concluidos / total_linhas) * 100))
                     status_text.text(f"Auditando bases: {concluidos} de {total_linhas} NCMs extraídas...")
 
-            # FASE 2: AVALIAÇÃO DA IA E CORREÇÃO SISCOMEX EM LOTES (CHUNKING)
+            # FASE 2: AVALIAÇÃO DA IA E CORREÇÃO SISCOMEX EM LOTES COM ROTAÇÃO DE CHAVES
             if lote_para_ia:
                 resultados_ia = []
                 TAMANHO_LOTE = 200
@@ -325,14 +361,10 @@ if not st.session_state.processado:
                     pedaco = lote_para_ia[i : i + TAMANHO_LOTE]
                     fim_lote = min(i + TAMANHO_LOTE, len(lote_para_ia))
                     
-                    status_text.info(f"🧠 IA cruzando regras tributárias: Avaliando pacote {i + 1} até {fim_lote} de {len(lote_para_ia)}...")
+                    status_text.info(f"🧠 IA cruzando regras tributárias (Multi-API): Avaliando pacote {i + 1} até {fim_lote} de {len(lote_para_ia)}...")
                     
                     resposta_pedaco = ai_analisar_lote(pedaco)
                     resultados_ia.extend(resposta_pedaco)
-                    
-                    # Pausa de 5 segundos para não estourar o Rate Limit, exceto se for o último lote
-                    if fim_lote < len(lote_para_ia):
-                        time.sleep(5)
                 
                 status_text.info("🛠️ Análise concluída. Aplicando resultados e buscando correções oficiais no Siscomex...")
                 
