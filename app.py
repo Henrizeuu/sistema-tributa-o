@@ -18,7 +18,7 @@ from ncm.exceptions import NcmDownloadException
 # TRUQUE PARA A NUVEM: Força a instalação do navegador invisível no servidor do Streamlit
 os.system("playwright install chromium")
 
-# === CREDENCIAIS DO PORTAL ITC NET (ESTAVAM FALTANDO) ===
+# === CREDENCIAIS DO PORTAL NET (ESTAVAM FALTANDO) ===
 USUARIO_ITC = st.secrets["USUARIO_ITC"]
 SENHA_ITC = st.secrets["SENHA_ITC"]
 
@@ -183,7 +183,7 @@ def raspar_cenarios_ncm(ncm_bruta, descricao_produto, uf_codigo, index, session)
         
         form_alvo = soup_1.find("form", attrs={"name": "selecionar"})
         if not form_alvo:
-            return index, {"erro": "NCM não encontrada no portal ITC"}
+            return index, {"erro": "NCM não encontrada no portal"}
             
         opcoes_tributacao = {}
         radios = form_alvo.find_all("input", attrs={"name": "tributacao_cod", "type": "radio"})
@@ -198,7 +198,7 @@ def raspar_cenarios_ncm(ncm_bruta, descricao_produto, uf_codigo, index, session)
             if hidden:
                 opcoes_tributacao[hidden["value"]] = "Opção Única"
             else:
-                return index, {"erro": "NCM não encontrada no portal ITC"}
+                return index, {"erro": "NCM não encontrada no portal"}
         
         cenarios_extraidos = []
         for cod_tributacao, desc_opcao in opcoes_tributacao.items():
